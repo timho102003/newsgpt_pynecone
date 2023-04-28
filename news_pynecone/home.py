@@ -1,4 +1,3 @@
-import os
 import json
 import requests
 import feedparser
@@ -8,17 +7,18 @@ from pygooglenews import GoogleNews
 from newspaper import Article, Config
 import nltk
 import time
-import openai
 nltk.download('punkt')
 
 
 class State(pc.State):
-    text: str = "Type something..."
+    text: str = ""
     titles: List[List] = []
     img_src: str = ""
     resource_href: List = []
     src_meta: List[List] = []
     summary: str = ""
+    summary_end: bool = False
+    summary_start: bool = False
     middle_summary_state:str = ""
     openai_key_show: bool = False
     _valid_state = ["info", "error", "success"]
@@ -35,7 +35,7 @@ class State(pc.State):
             The similarities between the articles would be that they all cover the new car launch, while the differences would be the varying retail prices reported. 
             The final output should include a summary paragraph followed by a list of similarities and differences, 
             where the differences are presented in the format of source A reporting a price of $10, while source B reports a price of $15.
-            response should be formed organized and neat in html layout.
+            response should be formed organized and neat in html layout, give me the h3 title and highlight the keyword as bold.
         '''
 
     show_progress = False
@@ -44,16 +44,28 @@ class State(pc.State):
     _ENDPOINT_URL = 'https://api.openai.com/v1/chat/completions'
     _OPENAI_HEADER: dict = {}
 
-    def toggle_progress(self):
-        self.show_progress = not self.show_progress
+    def reset_state_and_go_home(self):
+        # Reset state variables to their initial values
+        self.titles = []
+        self.img_src = ""
+        self.resource_href = []
+        self.src_meta = []
+        self.summary = ""
+        self.middle_summary_state = ""
+        self.summary_start = False
+        self.summary_end = False
+        # Navigate to the home page
+        return pc.redirect("/")
 
     def search(self):
         self.summary = ""
         self.middle_summary_state = ""
         self.titles = []
         self.src_meta = []
-        if self.text != "":
-            src_response = self._engine.search(self.text, when="3d")
+        self.summary_start = False
+        self.summary_end = False
+        if self.text != "intext:":
+            src_response = self._engine.search(self.text, when="1d")
             # title, src, date, url
             for t in src_response["entries"]:
                 self.titles.append(t["title"].split(" - ")[0])
@@ -87,26 +99,32 @@ class State(pc.State):
                                    "Authorization": f"Bearer {self.OPENAI_API_KEY}"
                                    }
 
-    def summarize(self, cur_title):
+    async def summarize(self, cur_title):
+        self.summary_start = True
         cur_index = self.titles.index(cur_title)
         cur_src_meta = self.fetch_info(self.src_meta[cur_index][2])
         print(self.is_valid_code)
+        print(cur_src_meta)
         self.middle_summary_state += "<strong>Start related content ........</strong>\n"
-        if cur_src_meta is not None and self.is_valid_code == "success":
+        if isinstance(cur_src_meta, dict) and self.is_valid_code == "success":
             self.img_src = cur_src_meta["image"]
+            print("1")
             self.middle_summary_state += "<strong>{}</strong>\n".format(f"Processing Main Article: {cur_src_meta['title']}")
-            related = self._engine.search(cur_src_meta['title'], when="7d")
+            print("2")
+            related = self._engine.search(cur_src_meta['title'], when="3d")
             # print("----------- Finish finding related news")
             summary_list = [cur_src_meta["body"]]
+            print("3")
             self.resource_href.append(cur_src_meta["url"])
+            print("4")
             r_i = 1
             for r in related["entries"][1:6]:
-                # print(f"+++++++++++++: {r['title']}")
+                print(f"+++++++++++++: {r['title']}")
                 r_meta = self.fetch_info(r["link"])
-                if r_meta is not None:
+                if isinstance(r_meta, dict):
                     summary_list.append(r_meta["body"])
                     self.resource_href.append(r_meta["url"])
-                    # print(f"-------------: {r['title']}")
+                    print(f"-------------: {r['title']}")
                     self.middle_summary_state += "<strong>{}</strong>\n".format(f"Processing Related Article {r_i}: {r['title']}")
                     r_i += 1
                     time.sleep(3)
@@ -115,17 +133,17 @@ class State(pc.State):
             self.call_openai(summary_list)
             # print("SUMMARY: ")
             # print(self.summary)
-        elif cur_src_meta is not None and self.is_valid_code != "success":
-            self.summary = "<strong>Please set up your openai api-key before running NewsGPT</strong>"
+        elif isinstance(cur_src_meta, dict) and self.is_valid_code != "success":
+            self.middle_summary_state = "<strong>Please set up your openai api-key before running NewsGPT</strong>"
         else:
-            self.summary = "<strong>Please set up your openai api-key before running NewsGPT</strong>"
-    
-    @pc.var
-    def get_summary(self):
-        if self.summary == "":
-            return self.middle_summary_state
-        else:
-            return self.summary
+            self.middle_summary_state = f"<strong>Something went wrong: {cur_src_meta}</strong>"
+        self.summary = self.middle_summary_state
+        self.summary_end = True
+        print("Final Summary: ")
+        print(self.middle_summary_state)
+
+    def redirect(self):
+        return pc.redirect("/")
 
     def fetch_info(self, rss_feed):
         news_feed = feedparser.parse(rss_feed)
@@ -144,8 +162,8 @@ class State(pc.State):
                     "keywords": article.keywords,
                     "url": article.url
                 }
-        except:
-            return None
+        except Exception as e:
+            return str(e)
 
     def call_openai(self, article_list):
         summary_list = []
@@ -170,12 +188,12 @@ class State(pc.State):
                 response = requests.post(
                     url=self._ENDPOINT_URL, headers=self._OPENAI_HEADER, data=json.dumps(data))
                 response_json = response.json()
-                # print(response_json)
+                print(response_json)
                 answer = response_json["choices"][0]["message"]["content"].strip(
                 )
                 summary_list.append(answer)
                 error_list.append("")
-                self._middle_summary_state += "<strong>{}</strong>".format(f"Summarizing Article {s_i} ......")
+                self.middle_summary_state += "<strong>{}</strong>".format(f"Summarizing Article {s_i} ......")
             except Exception as e:
                 error_list.append(e)
 
@@ -192,29 +210,20 @@ class State(pc.State):
                 "messages": messages,
                 "temperature": 0.7
             }
-            # print(messages)
-            self._middle_summary_state += "<strong>{}</strong>".format(f"Analyzing All Articles .....")
+            print(messages)
+            self.middle_summary_state += "<strong>{}</strong>".format(f"Analyzing All Articles .....")
             try:
                 response = requests.post(
                     url=self._ENDPOINT_URL, headers=self._OPENAI_HEADER, data=json.dumps(data))
                 response_json = response.json()
-                # print(response_json)
-                self.summary = \
-                    f"""
-                                Reference article number: {len(summary_list)}  
-                                {response_json["choices"][0]["message"]["content"].strip()}
-                                """
-                # print("Finish Calling OPENAI")
+                print(response_json)
+                self.middle_summary_state = response_json["choices"][0]["message"]["content"]
+                print("Finish Calling OPENAI")
             except Exception as e:
-                self.summary = e
+                self.middle_summary_state = e
         else:
             # print(error_list)
-            self.summary = "Something went wrong"
-
-    def clear(self):
-        self.summary = ""
-        self.titles = []
-        self.src_meta = []
+            self.middle_summary_state = "Something went wrong"
 
     def openai_setup_window(self):
         self.openai_key_show = not (self.openai_key_show)
@@ -222,6 +231,10 @@ class State(pc.State):
     @pc.var
     def check_openai_setup(self):
         return self.OPENAI_API_KEY != ""
+    
+    @pc.var
+    def get_summary(self):
+        return self.middle_summary_state
 
 article_box_style = {
     "bg": "rgba(255,255,255, 0.5)",
@@ -247,12 +260,11 @@ def article_card(data):
                     data,
                     style=title_style
                 ),
-                on_click=State.summarize(data),
+                on_click=[State.summarize(data), State.redirect],
                 style=article_box_style,
                 _hover={"cursor": "pointer"}
             ),
         )
-
 
 def home():
     """The home page."""
@@ -268,10 +280,9 @@ def home():
                             font_weight=600,
                             background_image="linear-gradient(271.68deg, #EE756A 0.75%, #756AEE 88.52%)",
                             background_clip="text",
-                            margin_left="20px"
+                            margin_left="20px",
                         ),
-                        href="/",
-                        on_click=State.clear
+                        on_click=State.reset_state_and_go_home
                     ),
                     pc.spacer(),
                     pc.hstack(
@@ -333,7 +344,7 @@ def home():
                                         pc.hstack(
                                             pc.button(
                                                 "Submit",
-                                                on_click=State.submit_openai_key,
+                                                on_click=[State.submit_openai_key, State.reset_state_and_go_home],
                                             ),
                                             pc.button(
                                                 "Close",
